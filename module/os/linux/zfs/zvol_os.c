@@ -307,7 +307,11 @@ zvol_request(struct request_queue *q, struct bio *bio)
 #endif
 {
 #ifdef HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS
+#if defined(HAVE_BIO_BDEV_DISK)
+	struct request_queue *q = bio->bi_bdev->bd_disk->queue;
+#else
 	struct request_queue *q = bio->bi_disk->queue;
+#endif
 #endif
 	zvol_state_t *zv = q->queuedata;
 	fstrans_cookie_t cookie = spl_fstrans_mark();
@@ -353,6 +357,9 @@ zvol_request(struct request_queue *q, struct bio *bio)
 				zv->zv_zilog = zil_open(zv->zv_objset,
 				    zvol_get_data);
 				zv->zv_flags |= ZVOL_WRITTEN_TO;
+				/* replay / destroy done in zvol_create_minor */
+				VERIFY0((zv->zv_zilog->zl_header->zh_flags &
+				    ZIL_REPLAY_NEEDED));
 			}
 			rw_downgrade(&zv->zv_suspend_lock);
 		}
@@ -714,7 +721,9 @@ static struct block_device_operations zvol_ops = {
 	.ioctl			= zvol_ioctl,
 	.compat_ioctl		= zvol_compat_ioctl,
 	.check_events		= zvol_check_events,
+#ifdef HAVE_BLOCK_DEVICE_OPERATIONS_REVALIDATE_DISK
 	.revalidate_disk	= zvol_revalidate_disk,
+#endif
 	.getgeo			= zvol_getgeo,
 	.owner			= THIS_MODULE,
 #ifdef HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS
@@ -943,12 +952,16 @@ zvol_os_create_minor(const char *name)
 	blk_queue_flag_set(QUEUE_FLAG_SCSI_PASSTHROUGH, zv->zv_zso->zvo_queue);
 #endif
 
+	ASSERT3P(zv->zv_zilog, ==, NULL);
+	zv->zv_zilog = zil_open(os, zvol_get_data);
 	if (spa_writeable(dmu_objset_spa(os))) {
 		if (zil_replay_disable)
-			zil_destroy(dmu_objset_zil(os), B_FALSE);
+			zil_destroy(zv->zv_zilog, B_FALSE);
 		else
 			zil_replay(os, zv, zvol_replay_vector);
 	}
+	zil_close(zv->zv_zilog);
+	zv->zv_zilog = NULL;
 	ASSERT3P(zv->zv_kstat.dk_kstats, ==, NULL);
 	dataset_kstats_create(&zv->zv_kstat, zv->zv_objset);
 

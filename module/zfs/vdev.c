@@ -543,6 +543,8 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	 */
 	zfs_ratelimit_init(&vd->vdev_delay_rl, &zfs_slow_io_events_per_second,
 	    1);
+	zfs_ratelimit_init(&vd->vdev_deadman_rl, &zfs_slow_io_events_per_second,
+	    1);
 	zfs_ratelimit_init(&vd->vdev_checksum_rl,
 	    &zfs_checksum_events_per_second, 1);
 
@@ -1051,6 +1053,7 @@ vdev_free(vdev_t *vd)
 	cv_destroy(&vd->vdev_rebuild_io_cv);
 
 	zfs_ratelimit_fini(&vd->vdev_delay_rl);
+	zfs_ratelimit_fini(&vd->vdev_deadman_rl);
 	zfs_ratelimit_fini(&vd->vdev_checksum_rl);
 
 	if (vd == spa->spa_root_vdev)
@@ -2335,7 +2338,7 @@ vdev_hold(vdev_t *vd)
 	for (int c = 0; c < vd->vdev_children; c++)
 		vdev_hold(vd->vdev_child[c]);
 
-	if (vd->vdev_ops->vdev_op_leaf)
+	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_ops->vdev_op_hold != NULL)
 		vd->vdev_ops->vdev_op_hold(vd);
 }
 
@@ -2346,7 +2349,7 @@ vdev_rele(vdev_t *vd)
 	for (int c = 0; c < vd->vdev_children; c++)
 		vdev_rele(vd->vdev_child[c]);
 
-	if (vd->vdev_ops->vdev_op_leaf)
+	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_ops->vdev_op_rele != NULL)
 		vd->vdev_ops->vdev_op_rele(vd);
 }
 
@@ -4857,10 +4860,8 @@ vdev_is_bootable(vdev_t *vd)
 	if (!vd->vdev_ops->vdev_op_leaf) {
 		const char *vdev_type = vd->vdev_ops->vdev_op_type;
 
-		if (strcmp(vdev_type, VDEV_TYPE_MISSING) == 0 ||
-		    strcmp(vdev_type, VDEV_TYPE_INDIRECT) == 0) {
+		if (strcmp(vdev_type, VDEV_TYPE_MISSING) == 0)
 			return (B_FALSE);
-		}
 	}
 
 	for (int c = 0; c < vd->vdev_children; c++) {

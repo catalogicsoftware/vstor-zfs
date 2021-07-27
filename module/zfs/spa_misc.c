@@ -1307,9 +1307,9 @@ spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error, char *tag)
 		 */
 		vdev_autotrim_stop_wait(vd);
 
-		spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+		spa_config_enter(spa, SCL_STATE_ALL, spa, RW_WRITER);
 		vdev_free(vd);
-		spa_config_exit(spa, SCL_ALL, spa);
+		spa_config_exit(spa, SCL_STATE_ALL, spa);
 	}
 
 	/*
@@ -2973,10 +2973,10 @@ ZFS_MODULE_PARAM(zfs, zfs_, recover, INT, ZMOD_RW,
 ZFS_MODULE_PARAM(zfs, zfs_, free_leak_on_eio, INT, ZMOD_RW,
 	"Set to ignore IO errors during free and permanently leak the space");
 
-ZFS_MODULE_PARAM(zfs, zfs_, deadman_checktime_ms, ULONG, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_deadman, zfs_deadman_, checktime_ms, ULONG, ZMOD_RW,
 	"Dead I/O check interval in milliseconds");
 
-ZFS_MODULE_PARAM(zfs, zfs_, deadman_enabled, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_deadman, zfs_deadman_, enabled, INT, ZMOD_RW,
 	"Enable deadman timer");
 
 ZFS_MODULE_PARAM(zfs_spa, spa_, asize_inflation, INT, ZMOD_RW,
