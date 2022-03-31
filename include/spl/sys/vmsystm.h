@@ -50,7 +50,7 @@
 #define	freemem			(nr_free_pages() + \
 				global_page_state(NR_INACTIVE_FILE) + \
 				global_page_state(NR_INACTIVE_ANON) + \
-				global_page_state(NR_SLAB_RECLAIMABLE))
+				global_page_state(NR_SLAB_RECLAIMABLE_B))
 
 #define	xcopyin(from, to, size)		copy_from_user(to, from, size)
 #define	xcopyout(from, to, size)	copy_to_user(to, from, size)
