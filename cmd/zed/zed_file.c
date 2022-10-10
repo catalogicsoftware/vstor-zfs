@@ -12,11 +12,11 @@
  * You may not use this file except in compliance with the license.
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -160,6 +160,13 @@ zed_file_is_locked(int fd)
 	return (lock.l_pid);
 }
 
+
+#if __APPLE__
+#define	PROC_SELF_FD "/dev/fd"
+#else /* Linux-compatible layout */
+#define	PROC_SELF_FD "/proc/self/fd"
+#endif
+
 /*
  * Close all open file descriptors greater than or equal to [lowfd].
  * Any errors encountered while closing file descriptors are ignored.
@@ -167,20 +174,21 @@ zed_file_is_locked(int fd)
 void
 zed_file_close_from(int lowfd)
 {
-	const int maxfd_def = 256;
-	int errno_bak;
-	struct rlimit rl;
-	int maxfd;
+	int errno_bak = errno;
+	int maxfd = 0;
 	int fd;
+	DIR *fddir;
+	struct dirent *fdent;
 
-	errno_bak = errno;
-
-	if (getrlimit(RLIMIT_NOFILE, &rl) < 0) {
-		maxfd = maxfd_def;
-	} else if (rl.rlim_max == RLIM_INFINITY) {
-		maxfd = maxfd_def;
+	if ((fddir = opendir(PROC_SELF_FD)) != NULL) {
+		while ((fdent = readdir(fddir)) != NULL) {
+			fd = atoi(fdent->d_name);
+			if (fd > maxfd && fd != dirfd(fddir))
+				maxfd = fd;
+		}
+		(void) closedir(fddir);
 	} else {
-		maxfd = rl.rlim_max;
+		maxfd = sysconf(_SC_OPEN_MAX);
 	}
 	for (fd = lowfd; fd < maxfd; fd++)
 		(void) close(fd);

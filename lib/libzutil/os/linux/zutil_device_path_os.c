@@ -155,14 +155,259 @@ zfs_strip_path(char *path)
 }
 
 /*
+ * Read the contents of a sysfs file into an allocated buffer and remove the
+ * last newline.
+ *
+ * This is useful for reading sysfs files that return a single string.  Return
+ * an allocated string pointer on success, NULL otherwise.  Returned buffer
+ * must be freed by the user.
+ */
+static char *
+zfs_read_sysfs_file(char *filepath)
+{
+	char buf[4096];	/* all sysfs files report 4k size */
+	char *str = NULL;
+
+	FILE *fp = fopen(filepath, "r");
+	if (fp == NULL) {
+		return (NULL);
+	}
+	if (fgets(buf, sizeof (buf), fp) == buf) {
+		/* success */
+
+		/* Remove the last newline (if any) */
+		size_t len = strlen(buf);
+		if (buf[len - 1] == '\n') {
+			buf[len - 1] = '\0';
+		}
+		str = strdup(buf);
+	}
+
+	fclose(fp);
+
+	return (str);
+}
+
+/*
+ * Given a dev name like "nvme0n1", return the full PCI slot sysfs path to
+ * the drive (in /sys/bus/pci/slots).
+ *
+ * For example:
+ *     dev:            "nvme0n1"
+ *     returns:        "/sys/bus/pci/slots/0"
+ *
+ * 'dev' must be an NVMe device.
+ *
+ * Returned string must be freed.  Returns NULL on error or no sysfs path.
+ */
+static char *
+zfs_get_pci_slots_sys_path(const char *dev_name)
+{
+	DIR *dp = NULL;
+	struct dirent *ep;
+	char *address1 = NULL;
+	char *address2 = NULL;
+	char *path = NULL;
+	char buf[MAXPATHLEN];
+	char *tmp;
+
+	/* If they preface 'dev' with a path (like "/dev") then strip it off */
+	tmp = strrchr(dev_name, '/');
+	if (tmp != NULL)
+		dev_name = tmp + 1;    /* +1 since we want the chr after '/' */
+
+	if (strncmp("nvme", dev_name, 4) != 0)
+		return (NULL);
+
+	(void) snprintf(buf, sizeof (buf), "/sys/block/%s/device/address",
+	    dev_name);
+
+	address1 = zfs_read_sysfs_file(buf);
+	if (!address1)
+		return (NULL);
+
+	/*
+	 * /sys/block/nvme0n1/device/address format will
+	 * be "0000:01:00.0" while /sys/bus/pci/slots/0/address will be
+	 * "0000:01:00".  Just NULL terminate at the '.' so they match.
+	 */
+	tmp = strrchr(address1, '.');
+	if (tmp != NULL)
+		*tmp = '\0';
+
+	dp = opendir("/sys/bus/pci/slots/");
+	if (dp == NULL) {
+		free(address1);
+		return (NULL);
+	}
+
+	/*
+	 * Look through all the /sys/bus/pci/slots/ subdirs
+	 */
+	while ((ep = readdir(dp))) {
+		/*
+		 * We only care about directory names that are a single number.
+		 * Sometimes there's other directories like
+		 * "/sys/bus/pci/slots/0-3/" in there - skip those.
+		 */
+		if (!zfs_isnumber(ep->d_name))
+			continue;
+
+		(void) snprintf(buf, sizeof (buf),
+		    "/sys/bus/pci/slots/%s/address", ep->d_name);
+
+		address2 = zfs_read_sysfs_file(buf);
+		if (!address2)
+			continue;
+
+		if (strcmp(address1, address2) == 0) {
+			/* Addresses match, we're all done */
+			free(address2);
+			if (asprintf(&path, "/sys/bus/pci/slots/%s",
+			    ep->d_name) == -1) {
+				free(tmp);
+				continue;
+			}
+			break;
+		}
+		free(address2);
+	}
+
+	closedir(dp);
+	free(address1);
+
+	return (path);
+}
+
+/*
+ * Given a dev name like "sda", return the full enclosure sysfs path to
+ * the disk.  You can also pass in the name with "/dev" prepended
+ * to it (like /dev/sda).  This works for both JBODs and NVMe PCI devices.
+ *
+ * For example, disk "sda" in enclosure slot 1:
+ *     dev_name:       "sda"
+ *     returns:        "/sys/class/enclosure/1:0:3:0/Slot 1"
+ *
+ * Or:
+ *
+ *      dev_name:   "nvme0n1"
+ *      returns:    "/sys/bus/pci/slots/0"
+ *
+ * 'dev' must be a non-devicemapper device.
+ *
+ * Returned string must be freed.  Returns NULL on error.
+ */
+char *
+zfs_get_enclosure_sysfs_path(const char *dev_name)
+{
+	DIR *dp = NULL;
+	struct dirent *ep;
+	char buf[MAXPATHLEN];
+	char *tmp1 = NULL;
+	char *tmp2 = NULL;
+	char *tmp3 = NULL;
+	char *path = NULL;
+	size_t size;
+	int tmpsize;
+
+	if (dev_name == NULL)
+		return (NULL);
+
+	/* If they preface 'dev' with a path (like "/dev") then strip it off */
+	tmp1 = strrchr(dev_name, '/');
+	if (tmp1 != NULL)
+		dev_name = tmp1 + 1;    /* +1 since we want the chr after '/' */
+
+	tmpsize = asprintf(&tmp1, "/sys/block/%s/device", dev_name);
+	if (tmpsize == -1 || tmp1 == NULL) {
+		tmp1 = NULL;
+		goto end;
+	}
+
+	dp = opendir(tmp1);
+	if (dp == NULL)
+		goto end;
+
+	/*
+	 * Look though all sysfs entries in /sys/block/<dev>/device for
+	 * the enclosure symlink.
+	 */
+	while ((ep = readdir(dp))) {
+		/* Ignore everything that's not our enclosure_device link */
+		if (strstr(ep->d_name, "enclosure_device") == NULL)
+			continue;
+
+		if (asprintf(&tmp2, "%s/%s", tmp1, ep->d_name) == -1) {
+			tmp2 = NULL;
+			break;
+		}
+
+		size = readlink(tmp2, buf, sizeof (buf));
+
+		/* Did readlink fail or crop the link name? */
+		if (size == -1 || size >= sizeof (buf))
+			break;
+
+		/*
+		 * We got a valid link.  readlink() doesn't terminate strings
+		 * so we have to do it.
+		 */
+		buf[size] = '\0';
+
+		/*
+		 * Our link will look like:
+		 *
+		 * "../../../../port-11:1:2/..STUFF../enclosure/1:0:3:0/SLOT 1"
+		 *
+		 * We want to grab the "enclosure/1:0:3:0/SLOT 1" part
+		 */
+		tmp3 = strstr(buf, "enclosure");
+		if (tmp3 == NULL)
+			break;
+
+		if (asprintf(&path, "/sys/class/%s", tmp3) == -1) {
+			/* If asprintf() fails, 'path' is undefined */
+			path = NULL;
+			break;
+		}
+
+		if (path == NULL)
+			break;
+	}
+
+end:
+	free(tmp2);
+	free(tmp1);
+
+	if (dp != NULL)
+		closedir(dp);
+
+	if (!path) {
+		/*
+		 * This particular disk isn't in a JBOD.  It could be an NVMe
+		 * drive. If so, look up the NVMe device's path in
+		 * /sys/bus/pci/slots/. Within that directory is a 'attention'
+		 * file which controls the NVMe fault LED.
+		 */
+		path = zfs_get_pci_slots_sys_path(dev_name);
+	}
+
+	return (path);
+}
+
+/*
  * Allocate and return the underlying device name for a device mapper device.
- * If a device mapper device maps to multiple devices, return the first device.
  *
  * For example, dm_name = "/dev/dm-0" could return "/dev/sda". Symlinks to a
  * DM device (like /dev/disk/by-vdev/A0) are also allowed.
  *
- * Returns device name, or NULL on error or no match.  If dm_name is not a DM
- * device then return NULL.
+ * If the DM device has multiple underlying devices (like with multipath
+ * DM devices), then favor underlying devices that have a symlink back to their
+ * back to their enclosure device in sysfs.  This will be useful for the
+ * zedlet scripts that toggle the fault LED.
+ *
+ * Returns an underlying device name, or NULL on error or no match.  If dm_name
+ * is not a DM device then return NULL.
  *
  * NOTE: The returned name string must be *freed*.
  */
@@ -176,6 +421,8 @@ dm_get_underlying_path(const char *dm_name)
 	char *path = NULL;
 	char *dev_str;
 	int size;
+	char *first_path = NULL;
+	char *enclosure_path;
 
 	if (dm_name == NULL)
 		return (NULL);
@@ -204,13 +451,27 @@ dm_get_underlying_path(const char *dm_name)
 		goto end;
 
 	/*
-	 * Return first entry (that isn't itself a directory) in the
-	 * directory containing device-mapper dependent (underlying)
-	 * devices.
+	 * A device-mapper device can have multiple paths to it (multipath).
+	 * Favor paths that have a symlink back to their enclosure device.
+	 * We have to do this since some enclosures may only provide a symlink
+	 * back for one underlying path to a disk and not the other.
+	 *
+	 * If no paths have links back to their enclosure, then just return the
+	 * first path.
 	 */
 	while ((ep = readdir(dp))) {
 		if (ep->d_type != DT_DIR) {	/* skip "." and ".." dirs */
+			if (!first_path)
+				first_path = strdup(ep->d_name);
+
+			enclosure_path =
+			    zfs_get_enclosure_sysfs_path(ep->d_name);
+
+			if (!enclosure_path)
+				continue;
+
 			size = asprintf(&path, "/dev/%s", ep->d_name);
+			free(enclosure_path);
 			break;
 		}
 	}
@@ -220,6 +481,17 @@ end:
 		closedir(dp);
 	free(tmp);
 	free(realp);
+
+	if (!path) {
+		/*
+		 * None of the underlying paths had a link back to their
+		 * enclosure devices.  Throw up out hands and return the first
+		 * underlying path.
+		 */
+		size = asprintf(&path, "/dev/%s", first_path);
+	}
+
+	free(first_path);
 	return (path);
 }
 
@@ -331,110 +603,6 @@ zfs_get_underlying_path(const char *dev_name)
 	return (name);
 }
 
-/*
- * Given a dev name like "sda", return the full enclosure sysfs path to
- * the disk.  You can also pass in the name with "/dev" prepended
- * to it (like /dev/sda).
- *
- * For example, disk "sda" in enclosure slot 1:
- *     dev:            "sda"
- *     returns:        "/sys/class/enclosure/1:0:3:0/Slot 1"
- *
- * 'dev' must be a non-devicemapper device.
- *
- * Returned string must be freed.
- */
-char *
-zfs_get_enclosure_sysfs_path(const char *dev_name)
-{
-	DIR *dp = NULL;
-	struct dirent *ep;
-	char buf[MAXPATHLEN];
-	char *tmp1 = NULL;
-	char *tmp2 = NULL;
-	char *tmp3 = NULL;
-	char *path = NULL;
-	size_t size;
-	int tmpsize;
-
-	if (dev_name == NULL)
-		return (NULL);
-
-	/* If they preface 'dev' with a path (like "/dev") then strip it off */
-	tmp1 = strrchr(dev_name, '/');
-	if (tmp1 != NULL)
-		dev_name = tmp1 + 1;    /* +1 since we want the chr after '/' */
-
-	tmpsize = asprintf(&tmp1, "/sys/block/%s/device", dev_name);
-	if (tmpsize == -1 || tmp1 == NULL) {
-		tmp1 = NULL;
-		goto end;
-	}
-
-	dp = opendir(tmp1);
-	if (dp == NULL) {
-		tmp1 = NULL;	/* To make free() at the end a NOP */
-		goto end;
-	}
-
-	/*
-	 * Look though all sysfs entries in /sys/block/<dev>/device for
-	 * the enclosure symlink.
-	 */
-	while ((ep = readdir(dp))) {
-		/* Ignore everything that's not our enclosure_device link */
-		if (strstr(ep->d_name, "enclosure_device") == NULL)
-			continue;
-
-		if (asprintf(&tmp2, "%s/%s", tmp1, ep->d_name) == -1 ||
-		    tmp2 == NULL)
-			break;
-
-		size = readlink(tmp2, buf, sizeof (buf));
-
-		/* Did readlink fail or crop the link name? */
-		if (size == -1 || size >= sizeof (buf)) {
-			free(tmp2);
-			tmp2 = NULL;	/* To make free() at the end a NOP */
-			break;
-		}
-
-		/*
-		 * We got a valid link.  readlink() doesn't terminate strings
-		 * so we have to do it.
-		 */
-		buf[size] = '\0';
-
-		/*
-		 * Our link will look like:
-		 *
-		 * "../../../../port-11:1:2/..STUFF../enclosure/1:0:3:0/SLOT 1"
-		 *
-		 * We want to grab the "enclosure/1:0:3:0/SLOT 1" part
-		 */
-		tmp3 = strstr(buf, "enclosure");
-		if (tmp3 == NULL)
-			break;
-
-		if (asprintf(&path, "/sys/class/%s", tmp3) == -1) {
-			/* If asprintf() fails, 'path' is undefined */
-			path = NULL;
-			break;
-		}
-
-		if (path == NULL)
-			break;
-	}
-
-end:
-	free(tmp2);
-	free(tmp1);
-
-	if (dp != NULL)
-		closedir(dp);
-
-	return (path);
-}
 
 #ifdef HAVE_LIBUDEV
 

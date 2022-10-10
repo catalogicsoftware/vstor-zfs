@@ -1221,171 +1221,18 @@ dmu_redact(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
 	dmu_buf_rele_array(dbp, numbufs, FTAG);
 }
 
-/*
- * DMU support for xuio
- */
-kstat_t *xuio_ksp = NULL;
-
-typedef struct xuio_stats {
-	/* loaned yet not returned arc_buf */
-	kstat_named_t xuiostat_onloan_rbuf;
-	kstat_named_t xuiostat_onloan_wbuf;
-	/* whether a copy is made when loaning out a read buffer */
-	kstat_named_t xuiostat_rbuf_copied;
-	kstat_named_t xuiostat_rbuf_nocopy;
-	/* whether a copy is made when assigning a write buffer */
-	kstat_named_t xuiostat_wbuf_copied;
-	kstat_named_t xuiostat_wbuf_nocopy;
-} xuio_stats_t;
-
-static xuio_stats_t xuio_stats = {
-	{ "onloan_read_buf",	KSTAT_DATA_UINT64 },
-	{ "onloan_write_buf",	KSTAT_DATA_UINT64 },
-	{ "read_buf_copied",	KSTAT_DATA_UINT64 },
-	{ "read_buf_nocopy",	KSTAT_DATA_UINT64 },
-	{ "write_buf_copied",	KSTAT_DATA_UINT64 },
-	{ "write_buf_nocopy",	KSTAT_DATA_UINT64 }
-};
-
-#define	XUIOSTAT_INCR(stat, val)        \
-	atomic_add_64(&xuio_stats.stat.value.ui64, (val))
-#define	XUIOSTAT_BUMP(stat)	XUIOSTAT_INCR(stat, 1)
-
-#ifdef HAVE_UIO_ZEROCOPY
-int
-dmu_xuio_init(xuio_t *xuio, int nblk)
-{
-	dmu_xuio_t *priv;
-	uio_t *uio = &xuio->xu_uio;
-
-	uio->uio_iovcnt = nblk;
-	uio->uio_iov = kmem_zalloc(nblk * sizeof (iovec_t), KM_SLEEP);
-
-	priv = kmem_zalloc(sizeof (dmu_xuio_t), KM_SLEEP);
-	priv->cnt = nblk;
-	priv->bufs = kmem_zalloc(nblk * sizeof (arc_buf_t *), KM_SLEEP);
-	priv->iovp = (iovec_t *)uio->uio_iov;
-	XUIO_XUZC_PRIV(xuio) = priv;
-
-	if (XUIO_XUZC_RW(xuio) == UIO_READ)
-		XUIOSTAT_INCR(xuiostat_onloan_rbuf, nblk);
-	else
-		XUIOSTAT_INCR(xuiostat_onloan_wbuf, nblk);
-
-	return (0);
-}
-
-void
-dmu_xuio_fini(xuio_t *xuio)
-{
-	dmu_xuio_t *priv = XUIO_XUZC_PRIV(xuio);
-	int nblk = priv->cnt;
-
-	kmem_free(priv->iovp, nblk * sizeof (iovec_t));
-	kmem_free(priv->bufs, nblk * sizeof (arc_buf_t *));
-	kmem_free(priv, sizeof (dmu_xuio_t));
-
-	if (XUIO_XUZC_RW(xuio) == UIO_READ)
-		XUIOSTAT_INCR(xuiostat_onloan_rbuf, -nblk);
-	else
-		XUIOSTAT_INCR(xuiostat_onloan_wbuf, -nblk);
-}
-
-/*
- * Initialize iov[priv->next] and priv->bufs[priv->next] with { off, n, abuf }
- * and increase priv->next by 1.
- */
-int
-dmu_xuio_add(xuio_t *xuio, arc_buf_t *abuf, offset_t off, size_t n)
-{
-	struct iovec *iov;
-	uio_t *uio = &xuio->xu_uio;
-	dmu_xuio_t *priv = XUIO_XUZC_PRIV(xuio);
-	int i = priv->next++;
-
-	ASSERT(i < priv->cnt);
-	ASSERT(off + n <= arc_buf_lsize(abuf));
-	iov = (iovec_t *)uio->uio_iov + i;
-	iov->iov_base = (char *)abuf->b_data + off;
-	iov->iov_len = n;
-	priv->bufs[i] = abuf;
-	return (0);
-}
-
-int
-dmu_xuio_cnt(xuio_t *xuio)
-{
-	dmu_xuio_t *priv = XUIO_XUZC_PRIV(xuio);
-	return (priv->cnt);
-}
-
-arc_buf_t *
-dmu_xuio_arcbuf(xuio_t *xuio, int i)
-{
-	dmu_xuio_t *priv = XUIO_XUZC_PRIV(xuio);
-
-	ASSERT(i < priv->cnt);
-	return (priv->bufs[i]);
-}
-
-void
-dmu_xuio_clear(xuio_t *xuio, int i)
-{
-	dmu_xuio_t *priv = XUIO_XUZC_PRIV(xuio);
-
-	ASSERT(i < priv->cnt);
-	priv->bufs[i] = NULL;
-}
-#endif /* HAVE_UIO_ZEROCOPY */
-
-static void
-xuio_stat_init(void)
-{
-	xuio_ksp = kstat_create("zfs", 0, "xuio_stats", "misc",
-	    KSTAT_TYPE_NAMED, sizeof (xuio_stats) / sizeof (kstat_named_t),
-	    KSTAT_FLAG_VIRTUAL);
-	if (xuio_ksp != NULL) {
-		xuio_ksp->ks_data = &xuio_stats;
-		kstat_install(xuio_ksp);
-	}
-}
-
-static void
-xuio_stat_fini(void)
-{
-	if (xuio_ksp != NULL) {
-		kstat_delete(xuio_ksp);
-		xuio_ksp = NULL;
-	}
-}
-
-void
-xuio_stat_wbuf_copied(void)
-{
-	XUIOSTAT_BUMP(xuiostat_wbuf_copied);
-}
-
-void
-xuio_stat_wbuf_nocopy(void)
-{
-	XUIOSTAT_BUMP(xuiostat_wbuf_nocopy);
-}
-
 #ifdef _KERNEL
 int
-dmu_read_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size)
+dmu_read_uio_dnode(dnode_t *dn, zfs_uio_t *uio, uint64_t size)
 {
 	dmu_buf_t **dbp;
 	int numbufs, i, err;
-#ifdef HAVE_UIO_ZEROCOPY
-	xuio_t *xuio = NULL;
-#endif
 
 	/*
 	 * NB: we could do this block-at-a-time, but it's nice
 	 * to be reading in parallel.
 	 */
-	err = dmu_buf_hold_array_by_dnode(dn, uio_offset(uio), size,
+	err = dmu_buf_hold_array_by_dnode(dn, zfs_uio_offset(uio), size,
 	    TRUE, FTAG, &numbufs, &dbp, 0);
 	if (err)
 		return (err);
@@ -1397,31 +1244,12 @@ dmu_read_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size)
 
 		ASSERT(size > 0);
 
-		bufoff = uio_offset(uio) - db->db_offset;
+		bufoff = zfs_uio_offset(uio) - db->db_offset;
 		tocpy = MIN(db->db_size - bufoff, size);
 
-#ifdef HAVE_UIO_ZEROCOPY
-		if (xuio) {
-			dmu_buf_impl_t *dbi = (dmu_buf_impl_t *)db;
-			arc_buf_t *dbuf_abuf = dbi->db_buf;
-			arc_buf_t *abuf = dbuf_loan_arcbuf(dbi);
-			err = dmu_xuio_add(xuio, abuf, bufoff, tocpy);
-			if (!err)
-				uio_advance(uio, tocpy);
+		err = zfs_uio_fault_move((char *)db->db_data + bufoff, tocpy,
+		    UIO_READ, uio);
 
-			if (abuf == dbuf_abuf)
-				XUIOSTAT_BUMP(xuiostat_rbuf_nocopy);
-			else
-				XUIOSTAT_BUMP(xuiostat_rbuf_copied);
-		} else
-#endif
-#ifdef __FreeBSD__
-			err = vn_io_fault_uiomove((char *)db->db_data + bufoff,
-			    tocpy, uio);
-#else
-			err = uiomove((char *)db->db_data + bufoff, tocpy,
-			    UIO_READ, uio);
-#endif
 		if (err)
 			break;
 
@@ -1435,14 +1263,14 @@ dmu_read_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size)
 /*
  * Read 'size' bytes into the uio buffer.
  * From object zdb->db_object.
- * Starting at offset uio->uio_loffset.
+ * Starting at zfs_uio_offset(uio).
  *
  * If the caller already has a dbuf in the target object
  * (e.g. its bonus buffer), this routine is faster than dmu_read_uio(),
  * because we don't have to find the dnode_t for the object.
  */
 int
-dmu_read_uio_dbuf(dmu_buf_t *zdb, uio_t *uio, uint64_t size)
+dmu_read_uio_dbuf(dmu_buf_t *zdb, zfs_uio_t *uio, uint64_t size)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)zdb;
 	dnode_t *dn;
@@ -1462,10 +1290,10 @@ dmu_read_uio_dbuf(dmu_buf_t *zdb, uio_t *uio, uint64_t size)
 /*
  * Read 'size' bytes into the uio buffer.
  * From the specified object
- * Starting at offset uio->uio_loffset.
+ * Starting at offset zfs_uio_offset(uio).
  */
 int
-dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
+dmu_read_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size)
 {
 	dnode_t *dn;
 	int err;
@@ -1485,14 +1313,14 @@ dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
 }
 
 int
-dmu_write_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size, dmu_tx_t *tx)
+dmu_write_uio_dnode(dnode_t *dn, zfs_uio_t *uio, uint64_t size, dmu_tx_t *tx)
 {
 	dmu_buf_t **dbp;
 	int numbufs;
 	int err = 0;
 	int i;
 
-	err = dmu_buf_hold_array_by_dnode(dn, uio_offset(uio), size,
+	err = dmu_buf_hold_array_by_dnode(dn, zfs_uio_offset(uio), size,
 	    FALSE, FTAG, &numbufs, &dbp, DMU_READ_PREFETCH);
 	if (err)
 		return (err);
@@ -1504,7 +1332,7 @@ dmu_write_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size, dmu_tx_t *tx)
 
 		ASSERT(size > 0);
 
-		bufoff = uio_offset(uio) - db->db_offset;
+		bufoff = zfs_uio_offset(uio) - db->db_offset;
 		tocpy = MIN(db->db_size - bufoff, size);
 
 		ASSERT(i == 0 || i == numbufs-1 || tocpy == db->db_size);
@@ -1515,18 +1343,14 @@ dmu_write_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size, dmu_tx_t *tx)
 			dmu_buf_will_dirty(db, tx);
 
 		/*
-		 * XXX uiomove could block forever (eg.nfs-backed
+		 * XXX zfs_uiomove could block forever (eg.nfs-backed
 		 * pages).  There needs to be a uiolockdown() function
-		 * to lock the pages in memory, so that uiomove won't
+		 * to lock the pages in memory, so that zfs_uiomove won't
 		 * block.
 		 */
-#ifdef __FreeBSD__
-		err = vn_io_fault_uiomove((char *)db->db_data + bufoff,
-		    tocpy, uio);
-#else
-		err = uiomove((char *)db->db_data + bufoff, tocpy,
-		    UIO_WRITE, uio);
-#endif
+		err = zfs_uio_fault_move((char *)db->db_data + bufoff,
+		    tocpy, UIO_WRITE, uio);
+
 		if (tocpy == db->db_size)
 			dmu_buf_fill_done(db, tx);
 
@@ -1543,14 +1367,14 @@ dmu_write_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size, dmu_tx_t *tx)
 /*
  * Write 'size' bytes from the uio buffer.
  * To object zdb->db_object.
- * Starting at offset uio->uio_loffset.
+ * Starting at offset zfs_uio_offset(uio).
  *
  * If the caller already has a dbuf in the target object
  * (e.g. its bonus buffer), this routine is faster than dmu_write_uio(),
  * because we don't have to find the dnode_t for the object.
  */
 int
-dmu_write_uio_dbuf(dmu_buf_t *zdb, uio_t *uio, uint64_t size,
+dmu_write_uio_dbuf(dmu_buf_t *zdb, zfs_uio_t *uio, uint64_t size,
     dmu_tx_t *tx)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)zdb;
@@ -1571,10 +1395,10 @@ dmu_write_uio_dbuf(dmu_buf_t *zdb, uio_t *uio, uint64_t size,
 /*
  * Write 'size' bytes from the uio buffer.
  * To the specified object.
- * Starting at offset uio->uio_loffset.
+ * Starting at offset zfs_uio_offset(uio).
  */
 int
-dmu_write_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size,
+dmu_write_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size,
     dmu_tx_t *tx)
 {
 	dnode_t *dn;
@@ -1730,7 +1554,6 @@ dmu_assign_arcbuf_by_dnode(dnode_t *dn, uint64_t offset, arc_buf_t *buf,
 		dbuf_rele(db, FTAG);
 		dmu_write(os, object, offset, blksz, buf->b_data, tx);
 		dmu_return_arcbuf(buf);
-		XUIOSTAT_BUMP(xuiostat_wbuf_copied);
 	}
 
 	return (0);
@@ -2350,42 +2173,41 @@ int
 dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
 {
 	dnode_t *dn;
-	int i, err;
-	boolean_t clean = B_TRUE;
+	int err;
 
+restart:
 	err = dnode_hold(os, object, FTAG, &dn);
 	if (err)
 		return (err);
 
-	/*
-	 * Check if dnode is dirty
-	 */
-	for (i = 0; i < TXG_SIZE; i++) {
-		if (multilist_link_active(&dn->dn_dirty_link[i])) {
-			clean = B_FALSE;
-			break;
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+
+	if (dnode_is_dirty(dn)) {
+		/*
+		 * If the zfs_dmu_offset_next_sync module option is enabled
+		 * then strict hole reporting has been requested.  Dirty
+		 * dnodes must be synced to disk to accurately report all
+		 * holes.  When disabled (the default) dirty dnodes are
+		 * reported to not have any holes which is always safe.
+		 *
+		 * When called by zfs_holey_common() the zp->z_rangelock
+		 * is held to prevent zfs_write() and mmap writeback from
+		 * re-dirtying the dnode after txg_wait_synced().
+		 */
+		if (zfs_dmu_offset_next_sync) {
+			rw_exit(&dn->dn_struct_rwlock);
+			dnode_rele(dn, FTAG);
+			txg_wait_synced(dmu_objset_pool(os), 0);
+			goto restart;
 		}
-	}
 
-	/*
-	 * If compatibility option is on, sync any current changes before
-	 * we go trundling through the block pointers.
-	 */
-	if (!clean && zfs_dmu_offset_next_sync) {
-		clean = B_TRUE;
-		dnode_rele(dn, FTAG);
-		txg_wait_synced(dmu_objset_pool(os), 0);
-		err = dnode_hold(os, object, FTAG, &dn);
-		if (err)
-			return (err);
-	}
-
-	if (clean)
-		err = dnode_next_offset(dn,
-		    (hole ? DNODE_FIND_HOLE : 0), off, 1, 1, 0);
-	else
 		err = SET_ERROR(EBUSY);
+	} else {
+		err = dnode_next_offset(dn, DNODE_FIND_HAVELOCK |
+		    (hole ? DNODE_FIND_HOLE : 0), off, 1, 1, 0);
+	}
 
+	rw_exit(&dn->dn_struct_rwlock);
 	dnode_rele(dn, FTAG);
 
 	return (err);
@@ -2542,7 +2364,6 @@ dmu_init(void)
 	abd_init();
 	zfs_dbgmsg_init();
 	sa_cache_init();
-	xuio_stat_init();
 	dmu_objset_init();
 	dnode_init();
 	zfetch_init();
@@ -2562,7 +2383,6 @@ dmu_fini(void)
 	dbuf_fini();
 	dnode_fini();
 	dmu_objset_fini();
-	xuio_stat_fini();
 	sa_cache_fini();
 	zfs_dbgmsg_fini();
 	abd_fini();

@@ -72,6 +72,7 @@ extern "C" {
 #include <sys/trace.h>
 #include <sys/procfs_list.h>
 #include <sys/mod.h>
+#include <sys/uio_impl.h>
 #include <sys/zfs_context_os.h>
 #else /* _KERNEL || _STANDALONE */
 
@@ -760,7 +761,6 @@ extern void spl_fstrans_unmark(fstrans_cookie_t);
 extern int __spl_pf_fstrans_check(void);
 extern int kmem_cache_reap_active(void);
 
-#define	____cacheline_aligned
 
 /*
  * Kernel modules

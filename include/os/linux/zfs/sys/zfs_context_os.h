@@ -23,8 +23,8 @@
 #ifndef ZFS_CONTEXT_OS_H
 #define	ZFS_CONTEXT_OS_H
 
-#include <sys/uio_impl.h>
 #include <linux/dcache_compat.h>
 #include <linux/utsname_compat.h>
+#include <linux/compiler_compat.h>
 
 #endif

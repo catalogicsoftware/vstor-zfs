@@ -207,7 +207,11 @@ zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
 
 	td = curthread;
 
+#if __FreeBSD_version < 1400037
 	rc = fo_stat(fp, &sb, td->td_ucred, td);
+#else
+	rc = fo_stat(fp, &sb, td->td_ucred);
+#endif
 	if (rc)
 		return (SET_ERROR(rc));
 	zfattr->zfa_size = sb.st_size;
@@ -283,7 +287,7 @@ zfs_file_private(zfs_file_t *fp)
 int
 zfs_file_unlink(const char *fnamep)
 {
-	enum uio_seg seg = UIO_SYSSPACE;
+	zfs_uio_seg_t seg = UIO_SYSSPACE;
 	int rc;
 
 #if __FreeBSD_version >= 1300018

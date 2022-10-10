@@ -171,7 +171,7 @@ enum dnode_dirtycontext {
  * example, reading 32 dnodes from a 16k dnode block and all of the spill
  * blocks could issue 33 separate reads. Now suppose those dnodes have size
  * 1024 and therefore don't need spill blocks. Then the worst case number
- * of blocks read is reduced to from 33 to two--one per dnode block.
+ * of blocks read is reduced from 33 to two--one per dnode block.
  *
  * ZFS-on-Linux systems that make heavy use of extended attributes benefit
  * from this feature. In particular, ZFS-on-Linux supports the xattr=sa
@@ -232,8 +232,8 @@ typedef struct dnode_phys {
 	 * Both dn_pad2 and dn_pad3 are protected by the block's MAC. This
 	 * allows us to protect any fields that might be added here in the
 	 * future. In either case, developers will want to check
-	 * zio_crypt_init_uios_dnode() to ensure the new field is being
-	 * protected properly.
+	 * zio_crypt_init_uios_dnode() and zio_crypt_do_dnode_hmac_updates()
+	 * to ensure the new field is being protected and updated properly.
 	 */
 	uint64_t dn_pad3[4];
 
@@ -425,6 +425,7 @@ boolean_t dnode_add_ref(dnode_t *dn, void *ref);
 void dnode_rele(dnode_t *dn, void *ref);
 void dnode_rele_and_unlock(dnode_t *dn, void *tag, boolean_t evicting);
 int dnode_try_claim(objset_t *os, uint64_t object, int slots);
+boolean_t dnode_is_dirty(dnode_t *dn);
 void dnode_setdirty(dnode_t *dn, dmu_tx_t *tx);
 void dnode_set_dirtyctx(dnode_t *dn, dmu_tx_t *tx, void *tag);
 void dnode_sync(dnode_t *dn, dmu_tx_t *tx);
